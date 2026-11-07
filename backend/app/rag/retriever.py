@@ -1,14 +1,16 @@
-"""混合检索：向量余弦 + BM25 → RRF 名次融合。
+"""混合检索：Milvus(HNSW/COSINE) 向量召回 + BM25 关键词召回 → RRF 名次融合。
 
-零外部依赖：中文用「单字 + 相邻二元组」做词项，向量用 numpy 余弦。
-没有 embedding 模型 / 没有向量时自动降级为纯关键词，并在结果里标记 degraded。
+- 切片文本与金标仍在 MySQL，用于 BM25 与引用回链
+- 向量由 LangChain Embeddings 生成、存 Milvus，不在 MySQL 里存数组
+- Milvus / embedding 任一不可用 → 自动降级纯 BM25，并标记 degraded
 """
+import asyncio
 import math
 import re
 from collections import Counter
 
-import numpy as np
-
+from app.config import settings
+from app.infra.milvus_client import milvus_store
 from app.llm.factory import embed, get_model
 from app.models import KnowledgeChunk
 
@@ -46,16 +48,7 @@ def bm25_scores(query: str, docs: list[str], k1: float = 1.5, b: float = 0.75) -
     return scores
 
 
-def cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    va, vb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    denom = np.linalg.norm(va) * np.linalg.norm(vb)
-    return float(np.dot(va, vb) / denom) if denom else 0.0
-
-
 def rrf(*rankings: list[int], k: int = 60, weights: list[float] | None = None) -> dict[int, float]:
-    """rankings: 每路按优劣排序的候选下标列表。"""
     weights = weights or [1.0] * len(rankings)
     fused: dict[int, float] = {}
     for ranking, w in zip(rankings, weights):
@@ -65,27 +58,40 @@ def rrf(*rankings: list[int], k: int = 60, weights: list[float] | None = None) -
 
 
 async def hybrid_search(query: str, top_k: int = 5) -> dict:
+    backend = "milvus" if milvus_store.enabled else "off"
     rows = await KnowledgeChunk.all().prefetch_related("doc")
     if not rows:
-        return {"hits": [], "degraded": True, "engine": "empty-kb", "vector_count": 0}
+        return {"hits": [], "degraded": True, "engine": "empty-kb",
+                "vector_count": 0, "total_chunks": 0, "backend": backend}
 
+    by_id = {r.id: r for r in rows}
+    index_of = {r.id: i for i, r in enumerate(rows)}
     texts = [r.content for r in rows]
     kw_scores = bm25_scores(query, texts)
     kw_rank = [i for i, _ in sorted(enumerate(kw_scores), key=lambda x: -x[1]) if kw_scores[i] > 0]
 
     model = await get_model("embedding")
     q_vec = await embed([query], model) if model else []
-    vec_scores = [cosine(q_vec[0] if q_vec else [], r.embedding or []) for r in rows]
-    vec_rank = [i for i, _ in sorted(enumerate(vec_scores), key=lambda x: -x[1]) if vec_scores[i] > 0]
+    vec_hits: list[dict] = []
+    if q_vec and len(q_vec[0]) == settings.EMBED_DIM:
+        vec_hits = await asyncio.to_thread(milvus_store.search, q_vec[0], settings.MILVUS_TOPK)
 
-    vector_count = sum(1 for r in rows if r.embedding)
+    vec_score_by_idx: dict[int, float] = {}
+    vec_rank: list[int] = []
+    for h in vec_hits:
+        idx = index_of.get(int(h["id"]))
+        if idx is None:
+            continue
+        vec_score_by_idx[idx] = h["score"]
+        vec_rank.append(idx)
+
     degraded = not vec_rank
     if degraded:
         fused = {idx: 1 / (60 + rank + 1) for rank, idx in enumerate(kw_rank)}
-        engine = "bm25-only (no embedding)"
+        engine = "bm25-only (Milvus/embedding 未命中)"
     else:
         fused = rrf(vec_rank, kw_rank, weights=[0.6, 0.4])
-        engine = "vector + bm25 + RRF"
+        engine = "milvus(HNSW/COSINE) + bm25 + RRF"
 
     hits = []
     for idx, score in sorted(fused.items(), key=lambda x: -x[1])[:top_k]:
@@ -97,8 +103,9 @@ async def hybrid_search(query: str, top_k: int = 5) -> dict:
             "idx": r.idx,
             "content": r.content,
             "score": round(float(score), 6),
-            "vector_score": round(vec_scores[idx], 4),
+            "vector_score": round(vec_score_by_idx.get(idx, 0.0), 4),
             "keyword_score": round(kw_scores[idx], 4),
         })
     return {"hits": hits, "degraded": degraded, "engine": engine,
-            "vector_count": vector_count, "total_chunks": len(rows)}
+            "vector_count": len(vec_hits), "total_chunks": len(rows),
+            "backend": backend}

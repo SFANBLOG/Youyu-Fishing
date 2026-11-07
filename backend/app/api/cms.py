@@ -1,14 +1,19 @@
-import os
+import asyncio
+import logging
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import Response
 
 from app.config import settings
 from app.deps import admin_user
+from app.infra.minio_client import CONTENT_TYPES, minio_store
 from app.models import Banner, News, Notice
 from app.result import BizError, Result
 from app.schemas import Account, BannerIn, NewsIn, NoticeIn
+
+logger = logging.getLogger("youyu.upload")
 
 router = APIRouter(tags=["内容"])
 
@@ -117,17 +122,49 @@ async def delete_notice(nid: int, _: Account = Depends(admin_user)):
     return Result.success()
 
 
-@router.post("/upload")
-async def upload(file: UploadFile = File(...), _: Account = Depends(admin_user)):
-    """wangEditor 要求返回 {errno, data:[{url}]}。"""
-    ext = Path(file.filename or "x.png").suffix.lower() or ".png"
-    if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
-        raise BizError("不支持的图片格式")
+def _save_local(content: bytes, ext: str) -> str:
     folder = Path(__file__).resolve().parent.parent.parent / settings.UPLOAD_DIR
     folder.mkdir(parents=True, exist_ok=True)
     name = uuid.uuid4().hex + ext
-    content = await file.read()
     (folder / name).write_bytes(content)
-    url = f"/uploads/{name}"
+    return f"/uploads/{name}"
+
+
+@router.post("/upload")
+async def upload(file: UploadFile = File(...), _: Account = Depends(admin_user)):
+    """wangEditor 要求返回 {errno, data:[{url}]}；MinIO 模式返回后端代理地址。"""
+    ext = Path(file.filename or "x.png").suffix.lower() or ".png"
+    if ext not in CONTENT_TYPES:
+        raise BizError("不支持的图片格式")
+    content = await file.read()
+    if not content or len(content) > settings.MAX_UPLOAD_SIZE:
+        raise BizError("图片为空或超过大小限制")
+
+    url: str | None = None
+    if minio_store.enabled:
+        try:
+            object_name = await asyncio.to_thread(minio_store.put, content, file.filename or "x.png")
+            url = f"/api/files/{object_name}"
+        except Exception as exc:
+            logger.warning("MinIO 上传失败，降级本地磁盘：%s", exc)
+            minio_store.disable()
+    if url is None:
+        url = await asyncio.to_thread(_save_local, content, ext)
+
     return {"errno": 0, "data": [{"url": url, "alt": file.filename, "href": url}],
             "url": url}
+
+
+@router.get("/files/{object_path:path}")
+async def read_object(object_path: str):
+    """代理读取 MinIO 私有桶对象，前端无需直连对象存储。"""
+    parts = object_path.replace("\\", "/").split("/")
+    if (not minio_store.enabled or not object_path or ".." in parts
+            or object_path.startswith("/") or Path(object_path).suffix.lower() not in CONTENT_TYPES):
+        raise BizError("文件不存在", 404)
+    try:
+        data, ctype = await asyncio.to_thread(minio_store.get, object_path)
+    except Exception:
+        raise BizError("文件不存在", 404)
+    return Response(content=data, media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=86400"})

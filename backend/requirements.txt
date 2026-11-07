@@ -1,7 +1,9 @@
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27
 tortoise-orm>=0.20,<0.25
-# Tortoise 0.24 与 aiosqlite 0.22+ 不兼容（Connection.start 缺失），固定此版本
+# Tortoise 的 mysql:// 依赖 aiomysql
+aiomysql>=0.2.0
+# 可选：本机无 MySQL 时用 sqlite:// 调试；Tortoise 0.24 需固定此版本（Connection.start 缺失）
 aiosqlite==0.20.0
 pydantic>=2.5,<3.0
 pydantic-settings>=2.1
@@ -9,8 +11,13 @@ PyJWT>=2.8
 python-multipart>=0.0.9
 aiofiles>=23.2
 httpx>=0.26
-numpy>=1.26
+# Milvus 2.x 向量库（客户端已兼容 2.3 / 2.4 两套建集合 API）
+pymilvus>=2.3.3
+# MinIO 对象存储
+minio>=7.2.0
+# LangChain 主链路（ChatOpenAI / OpenAIEmbeddings / StructuredTool）
 langchain-core>=0.2,<0.4
+langchain-openai>=0.1,<0.3
 langgraph>=0.1,<0.3
 pytest>=8.0
 pytest-asyncio>=0.23

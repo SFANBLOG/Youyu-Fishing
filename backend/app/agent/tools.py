@@ -1,24 +1,60 @@
-"""Agent 工具注册表。
+"""Agent 工具注册表：**LangChain StructuredTool**。
 
-工具描述写清楚「什么时候用、参数是什么」，模型才调得准。
-这里用轻量注册表实现（等价于 LangChain Tool 的 name/description/coroutine 三要素），
-如需换成 StructuredTool，只需把 TOOL_SPECS 映射到 langchain_core.tools.StructuredTool。
+每个工具都是可被 `llm.bind_tools(LANGCHAIN_TOOLS)` 或 LangGraph `ToolNode` 直接使用的
+标准 BaseTool；当前状态图里由 dispatch 显式调用底层函数以保留结构化数据（商品卡片），
+工具描述与参数 schema 的唯一真相源是这里的 StructuredTool。
 """
 import json
 import re
 
+from langchain_core.tools import StructuredTool
+
 from app.api.shop import product_dict
 from app.models import CartItem, Order, Product
 
+
+async def _lc_search_products(keyword: str) -> str:
+    text, _ = await search_products(keyword)
+    return text
+
+
+async def _lc_add_to_cart(product_id: int, user_id: int) -> str:
+    text, _ = await add_to_cart(product_id, user_id)
+    return text
+
+
+async def _lc_recommend_products(query: str) -> str:
+    text, _ = await recommend_products(query)
+    return text
+
+
+async def _lc_query_orders(user_id: int) -> str:
+    text, _ = await query_orders(user_id)
+    return text
+
+
+LANGCHAIN_TOOLS = [
+    StructuredTool.from_function(
+        coroutine=_lc_search_products, name="search_products",
+        description="按关键词搜索在售渔具商品，返回名称、价格、销量。参数 keyword 为商品名关键词。"),
+    StructuredTool.from_function(
+        coroutine=_lc_add_to_cart, name="add_to_cart",
+        description="把指定商品加入购物车。参数 product_id 为商品 ID，user_id 为当前用户 ID。"),
+    StructuredTool.from_function(
+        coroutine=_lc_recommend_products, name="recommend_products",
+        description="按预算、鱼种、场景推荐合适商品。参数 query 为用户的原始需求。"),
+    StructuredTool.from_function(
+        coroutine=_lc_query_orders, name="query_orders",
+        description="查询指定用户最近订单及状态。参数 user_id 为当前用户 ID。"),
+]
+TOOL_MAP = {t.name: t for t in LANGCHAIN_TOOLS}
 TOOL_SPECS = [
-    {"name": "search_products", "description": "按关键词搜索在售商品，返回名称、价格、销量、库存",
-     "when": ["找商品", "有没有", "多少钱", "查一下竿"]},
-    {"name": "add_to_cart", "description": "把指定商品加入当前用户购物车",
-     "when": ["加购", "加入购物车", "帮我买"]},
-    {"name": "recommend_products", "description": "按预算/场景/鱼种推荐合适的商品",
-     "when": ["推荐", "选竿", "新手", "预算"]},
-    {"name": "query_orders", "description": "查询当前用户最近订单及状态",
-     "when": ["订单", "物流", "发货", "买了什么"]},
+    {"name": t.name, "description": t.description,
+     "when": {"search_products": ["找商品", "有没有", "多少钱"],
+              "add_to_cart": ["加购", "加入购物车"],
+              "recommend_products": ["推荐", "选竿", "预算"],
+              "query_orders": ["订单", "物流", "发货"]}[t.name]}
+    for t in LANGCHAIN_TOOLS
 ]
 
 

@@ -15,20 +15,94 @@ services:
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pyouyu123"]
       interval: 5s
+      timeout: 5s
       retries: 20
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    command: minio server /minio_data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API（Milvus 与后端共用）
+      - "9001:9001"   # 控制台 http://localhost:9001
+    volumes:
+      - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  milvus:
+    image: milvusdb/milvus:v2.4.0
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 5
 
   backend:
     build: ./backend
     environment:
       DATABASE_URL: mysql://root:youyu123@mysql:3306/youyu
+      VECTOR_BACKEND: milvus
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      STORAGE_BACKEND: minio
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      LLM_FRAMEWORK: langchain
       CORS_ORIGINS: http://localhost:5173
     ports:
       - "8000:8000"
     depends_on:
       mysql:
         condition: service_healthy
+      minio:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
     volumes:
-      - ./backend/uploads:/app/uploads
+      - ./backend/uploads:/app/uploads   # MinIO 不可用时的本地降级目录
 
 volumes:
   mysql_data:
+  etcd_data:
+  minio_data:
+  milvus_data:

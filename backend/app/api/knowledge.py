@@ -1,6 +1,9 @@
+import asyncio
+
 from fastapi import APIRouter, Depends
 
 from app.deps import admin_user
+from app.infra.milvus_client import milvus_store
 from app.models import KnowledgeChunk, KnowledgeDoc
 from app.rag.embeddings import rebuild_index
 from app.rag.retriever import hybrid_search
@@ -54,15 +57,17 @@ async def update_doc(did: int, body: KnowledgeIn, _: Account = Depends(admin_use
 async def delete_doc(did: int, _: Account = Depends(admin_user)):
     await KnowledgeChunk.filter(doc_id=did).delete()
     await KnowledgeDoc.filter(id=did).delete()
+    await asyncio.to_thread(milvus_store.delete_doc, did)
     return Result.success()
 
 
 @router.get("/docs/{did}/chunks")
 async def list_chunks(did: int, _: Account = Depends(admin_user)):
     rows = await KnowledgeChunk.filter(doc_id=did).order_by("idx")
+    has_vector = await asyncio.to_thread(milvus_store.has_doc, did)
     return Result.success([{"id": c.id, "idx": c.idx, "content": c.content,
                             "start": c.start_char, "end": c.end_char,
-                            "has_vector": bool(c.embedding)} for c in rows])
+                            "has_vector": has_vector} for c in rows])
 
 
 @router.post("/docs/{did}/reindex")

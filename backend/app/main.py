@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from app import seed
 from app.config import settings
 from app.database import close_db, init_db
+from app.infra.milvus_client import milvus_store
+from app.infra.minio_client import minio_store
 from app.result import Result, register_exception_handlers
 from app.api import admin, ai_config, auth, chat, cms, knowledge, shop, trade
 
@@ -47,9 +50,12 @@ def ensure_assets():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.chdir(BASE)  # SQLite 相对路径落在 backend/ 下
+    os.chdir(BASE)  # 本地降级上传等相对路径落在 backend/ 下
     ensure_assets()
     await init_db()
+    # 基础设施初始化失败只告警：Milvus 降级纯 BM25，MinIO 降级本地磁盘
+    await asyncio.to_thread(milvus_store.ensure_collection)
+    await asyncio.to_thread(minio_store.ensure_bucket)
     await seed.seed()
     yield
     await close_db()

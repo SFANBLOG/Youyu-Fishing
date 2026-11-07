@@ -214,7 +214,7 @@ class KnowledgeChunk(TimestampMixin, models.Model):
     content = fields.TextField(default="")
     start_char = fields.IntField(default=0)
     end_char = fields.IntField(default=0)
-    embedding = fields.JSONField(default=list)  # 向量；无 embedding 模型时为空列表
+    embedding = fields.JSONField(default=list)  # 兼容旧版占位；向量统一存 Milvus，此处恒为空
 
     class Meta:
         table = "yy_knowledge_chunk"

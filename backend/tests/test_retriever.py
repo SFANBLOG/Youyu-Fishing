@@ -1,4 +1,4 @@
-from app.rag.retriever import bm25_scores, cosine, rrf, tokenize
+from app.rag.retriever import bm25_scores, rrf, tokenize
 
 
 def test_bm25_relevant_first():
@@ -13,11 +13,9 @@ def test_bm25_relevant_first():
     assert scores[1] >= 0
 
 
-def test_cosine():
-    assert cosine([1, 0], [1, 0]) > 0.99
-    assert cosine([1, 0], [0, 1]) == 0
-    assert cosine([], [1, 2]) == 0
-    assert cosine([1, 2], [1]) == 0  # 维度不一致
+def test_bm25_empty_inputs():
+    assert bm25_scores("", ["甲", "乙"]) == [0.0, 0.0]
+    assert bm25_scores("甲", []) == []
 
 
 def test_rrf_fusion():
@@ -28,6 +26,12 @@ def test_rrf_fusion():
     # 两路都靠前的 0 / 2 应优于只在单路出现的 1 / 3
     assert fused[0] > fused[1]
     assert fused[2] > fused[3]
+
+
+def test_rrf_weighted_vector_first():
+    fused = rrf([2, 0, 1], [0, 2, 3], weights=[0.6, 0.4])
+    assert fused[2] > fused[0]  # 向量权重更高，向量榜首应反超关键词榜首
+    assert fused[0] > fused[1]
 
 
 def test_tokenize_chinese():
